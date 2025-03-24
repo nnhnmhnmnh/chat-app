@@ -1,0 +1,17 @@
+{
+  "rename": "Rename",
+  "delete": "Delete",
+  "language": "Language",
+  "select_language": "Select language",
+  "theme": "Theme",
+  "select_theme": "Select theme",
+  "system": "System",
+  "light": "Light",
+  "dark": "Dark",
+  "logout": "Logout",
+  "delete_all": "Delete all chat",
+  "search": "Search",
+  "setting": "Setting",
+  "type_a_message": "Message",
+  "customize_chatbot": "Chatbot Customizer"
+}

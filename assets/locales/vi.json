@@ -1,0 +1,17 @@
+{
+  "rename": "Đổi tên",
+  "delete": "Xóa",
+  "language": "Ngôn ngữ",
+  "select_language": "Chọn ngôn ngữ",
+  "theme": "Chủ đề",
+  "select_theme": "Chọn chủ đề",
+  "system": "Theo hệ thống",
+  "light": "Sáng",
+  "dark": "Tối",
+  "logout": "Đăng xuất",
+  "delete_all": "Xóa tất cả đoạn chat",
+  "search": "Tìm kiếm",
+  "setting": "Cài đặt",
+  "type_a_message": "Tin nhắn",
+  "customize_chatbot": "Chatbot tùy chỉnh"
+}
