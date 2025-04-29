@@ -8,10 +8,12 @@ import 'locale_provider.dart';
 import 'screens/auth_screen.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 // import 'package:flutter_displaymode/flutter_displaymode.dart';
 
 
 void main() async {
+  await dotenv.load();
   WidgetsFlutterBinding.ensureInitialized();
   // try {
   //   await FlutterDisplayMode.setHighRefreshRate();
@@ -22,8 +24,8 @@ void main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
   await Supabase.initialize(
-    url: '',
-    anonKey: '',
+    url: dotenv.env['SUPABASE_URL']!,
+    anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
   );
   runApp(
     Pvd.ChangeNotifierProvider(

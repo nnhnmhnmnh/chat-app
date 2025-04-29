@@ -123,11 +123,12 @@ class _AudioPlayerItemState extends State<AudioPlayerItem> {
       padding: EdgeInsets.only(right: 10),
       height: 50,
       child: Row(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        // mainAxisSize: MainAxisSize.min,
+        // mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           IconButton(
             icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.white),
+            visualDensity: VisualDensity(horizontal: -4),
             onPressed: () {
               if (!isPlaying && !isPaused) {
                 // Nếu chưa phát, bấm play

@@ -13,5 +13,8 @@
   "search": "Tìm kiếm",
   "setting": "Cài đặt",
   "type_a_message": "Tin nhắn",
-  "customize_chatbot": "Chatbot tùy chỉnh"
+  "customize_chatbot": "Chatbot tùy chỉnh",
+  "create_image": "Tạo ảnh",
+  "pick_files": "Chọn tệp",
+  "message_avatar": "Avatar trong tin nhắn"
 }

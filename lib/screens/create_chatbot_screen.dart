@@ -23,7 +23,10 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
   final _nameController = TextEditingController();
   final _shortDescriptionController = TextEditingController();
   final _chatbotDescriptionController = TextEditingController();
+  final _supabaseStorage = Supabase.instance.client.storage.from('ai-chat-bucket');
   XFile? _selectedAvatar;
+  bool _isDefault = false;
+  String? _deleteAvatar;
 
   final ImagePicker _picker = ImagePicker();
 
@@ -43,6 +46,8 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
       _nameController.text = widget.chatbotData!['name'] ?? '';
       _shortDescriptionController.text = widget.chatbotData!['description'] ?? '';
       _chatbotDescriptionController.text = widget.chatbotData!['chatbotDescription'] ?? '';
+
+      _isDefault = widget.chatbotData!['isDefault'] ?? false;
     }
   }
 
@@ -55,16 +60,22 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
       String fileName = '${DateTime.now()}_${path.basename(_selectedAvatar!.path)}';
       File avatarFile = File(_selectedAvatar!.path);
 
+      // Nếu có avatar cũ và nó là URL Supabase thì xóa
+      final String? oldAvatarUrl = widget.chatbotData?['avatar'];
+      if (oldAvatarUrl != null) {
+        // Lấy đường dẫn file từ URL
+        final String filePath = Uri.decodeFull(oldAvatarUrl.split('/ai-chat-bucket/').last);
+        await _supabaseStorage.remove([filePath]);
+        print('Đã xóa avatar cũ: $filePath');
+      }
+
       // Upload file lên Supabase Storage
-      final response = await Supabase.instance.client.storage
-          .from('ai-chat-bucket')
-          .upload(fileName, avatarFile);
-      print("Upload response: $response");
+      final response = await _supabaseStorage.upload(fileName, avatarFile);
+      // print("Upload response: $response");
 
       // Lấy public URL của file đã upload
-      final String publicUrl = Supabase.instance.client.storage
-          .from('ai-chat-bucket')
-          .getPublicUrl(fileName);
+      final String publicUrl = _supabaseStorage.getPublicUrl(fileName);
+      print("publicUrl:$publicUrl");
       return publicUrl;
     } catch (e) {
       print('Error uploading avatar: $e');
@@ -82,6 +93,13 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
     String chatbotDescription = _chatbotDescriptionController.text.trim();
 
     try {
+      // Xóa avatar nếu người dùng xác nhận
+      if (_deleteAvatar != null) {
+        final fileName = Uri.decodeFull(_deleteAvatar!.split('/ai-chat-bucket/').last);
+        await _supabaseStorage.remove([fileName]);
+        _deleteAvatar = null;
+      }
+
       // Upload avatar và lấy URL
       String? avatarUrl = await _uploadAvatarToSupabase();
 
@@ -91,6 +109,7 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
         'shortDescription': shortDescription,
         'chatbotDescription': chatbotDescription,
         'avatarUrl': avatarUrl ?? widget.chatbotData?['avatar'] ?? '',
+        'isDefault': _isDefault,
       };
 
       if (widget.chatbotData != null && widget.chatbotData!['id'] != null) {
@@ -121,6 +140,39 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
     }
   }
 
+  void _showDeleteAvatarConfirmationDialog() {
+    if (widget.chatbotData?['avatar'] == null || widget.chatbotData?['avatar'].isEmpty) return;
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Delete Avatar?'),
+          content: Text('Are you sure you want to delete this avatar?'),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();  // Đóng hộp thoại
+              },
+              child: Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                // xóa avatar
+                _deleteAvatar = widget.chatbotData!['avatar'];
+                setState(() {
+                  _selectedAvatar = null;
+                  widget.chatbotData!['avatar'] = '';
+                });
+                Navigator.of(context).pop();  // Đóng hộp thoại
+              },
+              child: Text('Yes'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -136,69 +188,71 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         // Sử dụng Form để validate các trường bắt buộc
-        child: Form(
-          key: _formKey,
-          child: Column(
-            children: [
-              // Hình đại diện: Khi nhấn chọn để upload
-              GestureDetector(
-                onTap: _pickAvatar,
-                child: CircleAvatar(
-                  radius: 50,
-                  backgroundColor: Theme.of(context).colorScheme.shadow,
-                  backgroundImage: _selectedAvatar != null
+        child: SingleChildScrollView(
+          child: Form(
+            key: _formKey,
+            child: Column(
+              children: [
+                // Hình đại diện: Khi nhấn chọn để upload
+                GestureDetector(
+                  onLongPress: _showDeleteAvatarConfirmationDialog,
+                  onTap: _pickAvatar,
+                  child: CircleAvatar(
+                    radius: 50,
+                    backgroundColor: Theme.of(context).colorScheme.shadow,
+                    backgroundImage: _selectedAvatar != null
                       ? (Uri.tryParse(_selectedAvatar!.path)?.isAbsolute == true
-                      ? NetworkImage(_selectedAvatar!.path)
-                      : FileImage(File(_selectedAvatar!.path)) as ImageProvider)
-                      : (widget.chatbotData != null &&
-                      widget.chatbotData!['avatar'] != '')
-                      ? NetworkImage(widget.chatbotData!['avatar'])
-                      : null,
-                  child: (_selectedAvatar == null &&
-                      (widget.chatbotData == null ||
-                          widget.chatbotData!['avatar'] == ''))
-                      ? Icon(Icons.add_a_photo, size: 50, color: Colors.white)
-                      : null,
-                ),
-              ),
-              SizedBox(height: 16),
-              // Ô nhập Name
-              TextFormField(
-                controller: _nameController,
-                decoration: InputDecoration(
-                  hintText: 'Name',
-                  filled: true,
-                  fillColor: Theme.of(context).colorScheme.shadow,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(15.0),
-                    borderSide: BorderSide.none,
+                        ? NetworkImage(_selectedAvatar!.path)
+                        : FileImage(File(_selectedAvatar!.path)) as ImageProvider)
+                      : (widget.chatbotData != null && widget.chatbotData!['avatar'] != '')
+                        ? NetworkImage(widget.chatbotData!['avatar'])
+                        : null,
+                    child: (_selectedAvatar == null &&
+                        (widget.chatbotData == null ||
+                            widget.chatbotData!['avatar'] == ''))
+                        ? Icon(Icons.add_a_photo, size: 50, color: Colors.white)
+                        : null,
                   ),
                 ),
-                validator: (value) {
-                  if (value == null || value.trim().isEmpty) {
-                    return 'Vui lòng nhập tên chatbot';
-                  }
-                  return null;
-                },
-              ),
-              SizedBox(height: 16),
-              // Ô nhập Short Description (không bắt buộc)
-              TextFormField(
-                controller: _shortDescriptionController,
-                decoration: InputDecoration(
-                  hintText: 'Short Description (optional)',
-                  filled: true,
-                  fillColor: Theme.of(context).colorScheme.shadow,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(15.0),
-                    borderSide: BorderSide.none,
+                SizedBox(height: 16),
+                // Ô nhập Name
+                TextFormField(
+                  controller: _nameController,
+                  decoration: InputDecoration(
+                    hintText: 'Name',
+                    filled: true,
+                    fillColor: Theme.of(context).colorScheme.shadow,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(15.0),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return 'Vui lòng nhập tên chatbot';
+                    }
+                    return null;
+                  },
+                ),
+                SizedBox(height: 16),
+                // Ô nhập Short Description (không bắt buộc)
+                TextFormField(
+                  controller: _shortDescriptionController,
+                  decoration: InputDecoration(
+                    hintText: 'Short Description (optional)',
+                    filled: true,
+                    fillColor: Theme.of(context).colorScheme.shadow,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(15.0),
+                      borderSide: BorderSide.none,
+                    ),
                   ),
                 ),
-              ),
-              SizedBox(height: 16),
-              // Ô Chatbot Description: chiếm hết phần không gian còn lại
-              Expanded(
-                child: TextFormField(
+                SizedBox(height: 16),
+                // Ô Chatbot Description: chiếm hết phần không gian còn lại
+                // Expanded(
+                //   child:
+                TextFormField(
                   controller: _chatbotDescriptionController,
                   decoration: InputDecoration(
                     hintText: 'Chatbot Description',
@@ -210,8 +264,9 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
                       borderSide: BorderSide.none,
                     ),
                   ),
-                  maxLines: null,
-                  expands: true,
+                  minLines: 15,
+                  maxLines: 15,
+                  // expands: true,
                   validator: (value) {
                     if (value == null || value.trim().isEmpty) {
                       return 'Vui lòng nhập mô tả chatbot';
@@ -219,23 +274,77 @@ class _ChatbotCreateState extends State<ChatbotCreate> {
                     return null;
                   },
                 ),
-              ),
-              // SizedBox(height: 16),
-              // Nút Save
-              // SizedBox(
-              //   width: double.infinity,
-              //   height: 50,
-              //   child: ElevatedButton(
-              //     onPressed: _saveCustomization,
-              //     child: Text(
-              //       'Save',
-              //       style: TextStyle(
-              //       fontSize: 18,
-              //       fontWeight: FontWeight.bold,
-              //     ),),
-              //   ),
-              // ),
-            ],
+                // ),
+                SizedBox(height: 16),
+                // Nút Save
+                // SizedBox(
+                //   width: double.infinity,
+                //   height: 50,
+                //   child: ElevatedButton(
+                //     onPressed: _saveCustomization,
+                //     child: Text(
+                //       'Save',
+                //       style: TextStyle(
+                //       fontSize: 18,
+                //       fontWeight: FontWeight.bold,
+                //     ),),
+                //   ),
+                // ),
+                ListTileTheme(
+                  contentPadding: EdgeInsets.zero, // Xóa khoảng thụt lề mặc định
+                  child: Card(
+                    color: Theme.of(context).colorScheme.shadow,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10), // Bo góc của Card
+                    ),
+                    // elevation: 5, // Thêm bóng đổ cho Card
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 10.0, left: 10.0, right: 10.0), // Padding xung quanh content
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // Tiêu đề và Icon
+                                Row(
+                                  children: [
+                                    Icon(Icons.chat_bubble, color: Colors.blue), // Thêm icon chatbot
+                                    SizedBox(width: 10),
+                                    Text(
+                                      'Default Chatbot',
+                                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                                    ),
+                                  ],
+                                ),
+                                SizedBox(height: 8),
+          
+                                // Mô tả
+                                Text(
+                                  'When enabled, this chatbot will be used by default when you open the app.',
+                                  style: TextStyle(fontSize: 14, color: Colors.grey),
+                                ),
+                                SizedBox(height: 12),
+                              ],
+                            ),
+                          ),
+                          Switch(
+                            value: _isDefault,
+                            onChanged: (value) {
+                              setState(() {
+                                _isDefault = value;
+                              });
+                            },
+                            inactiveThumbColor: Colors.grey, // Màu khi tắt switch
+                          ),
+                        ]
+                      ),
+                    ),
+                  ),
+                ),
+          
+              ],
+            ),
           ),
         ),
       ),

@@ -19,6 +19,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   ThemeMode _themeMode = ThemeMode.system;
+  bool _isAvatarEnabled = false;
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
@@ -26,6 +27,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _loadThemeMode();
+    _loadAvatarSetting();
   }
 
   Future<Map<String, dynamic>> _getUserData() async {
@@ -45,6 +47,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _themeMode = ThemeMode.values.firstWhere((e) => e.toString() == theme);
       });
     }
+  }
+
+  void _setAvatarSetting(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isAvatarEnabled', value);
+    setState(() {
+      _isAvatarEnabled = value;
+    });
+  }
+
+  Future<void> _loadAvatarSetting() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _isAvatarEnabled = prefs.getBool('isAvatarEnabled') ?? false;
+    });
   }
 
   void _showLanguageDialog(BuildContext context, LocaleProvider provider) {
@@ -327,6 +344,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onTap: () {
                     _showThemeModeDialog(context);
                   },
+                ),
+                SwitchListTile(
+                  title: Text(AppLocalizations.of(context).translate('message_avatar')),
+                  secondary: Icon(Icons.account_circle),
+                  value: _isAvatarEnabled,
+                  onChanged: (value) {
+                    setState(() {
+                      _isAvatarEnabled = value;
+                      _setAvatarSetting(value);
+                    });
+                  },
+                  inactiveThumbColor: Colors.grey, // Màu nút gạt khi tắt
                 ),
                 ListTile(
                   leading: Icon(Icons.delete_sweep),

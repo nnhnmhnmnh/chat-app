@@ -91,13 +91,55 @@ class _ImageViewerScreenState extends State<ImageViewerScreen> {
           children: [
             // Hiển thị ảnh với kích thước full màn hình
             Center(
-              child: Image.network(
-                widget.imageUrl,
-                fit: BoxFit.contain,
-                width: double.infinity,
-                height: double.infinity,
+              child: InteractiveViewer(
+                panEnabled: true, // Cho phép kéo ảnh
+                minScale: 1.0,
+                maxScale: 4.0,
+                child: Image.network(
+                  widget.imageUrl,
+                  fit: BoxFit.contain,
+                  width: double.infinity,
+                  height: double.infinity,
+                ),
               ),
             ),
+
+            // Lớp phủ mờ ở đầu
+            if (_showControls)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: Container(
+                  height: 100,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Colors.black.withOpacity(0.6), Colors.transparent],
+                    ),
+                  ),
+                ),
+              ),
+
+            // Lớp phủ mờ ở đáy
+            if (_showControls)
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: Container(
+                  height: 100,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [Colors.black.withOpacity(0.6), Colors.transparent],
+                    ),
+                  ),
+                ),
+              ),
+
             // Nút download overlay hiển thị ở góc trên bên phải
             Positioned(
               top: 30,

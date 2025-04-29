@@ -3,7 +3,7 @@
   "delete": "Delete",
   "language": "Language",
   "select_language": "Select language",
-  "theme": "Theme",
+  "theme": "Theme mode",
   "select_theme": "Select theme",
   "system": "System",
   "light": "Light",
@@ -13,5 +13,8 @@
   "search": "Search",
   "setting": "Setting",
   "type_a_message": "Message",
-  "customize_chatbot": "Chatbot Customizer"
+  "customize_chatbot": "Chatbot customizer",
+  "create_image": "Create Image",
+  "pick_files": "Pick Files",
+  "message_avatar": "Message avatar"
 }

@@ -22,6 +22,12 @@ class _ChatbotCustomizeState extends State<ChatbotCustomize> {
     _loadChatbotList();
   }
 
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
   void _loadChatbotList() async {
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
 
@@ -38,6 +44,7 @@ class _ChatbotCustomizeState extends State<ChatbotCustomize> {
         'description': doc['shortDescription'],
         'avatar': doc['avatarUrl'],
         'chatbotDescription': doc['chatbotDescription'],
+        'isDefault': doc['isDefault'],
       };
     }).toList();
 
@@ -56,6 +63,7 @@ class _ChatbotCustomizeState extends State<ChatbotCustomize> {
         'description': doc['shortDescription'],
         'avatar': doc['avatarUrl'],
         'chatbotDescription': doc['chatbotDescription'],
+        'isDefault': doc['isDefault'],
       };
     }).toList();
 

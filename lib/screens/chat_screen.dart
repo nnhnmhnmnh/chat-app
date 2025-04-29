@@ -8,6 +8,7 @@ import 'package:chatapp/screens/video_player_screen.dart';
 import 'package:clipboard/clipboard.dart';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -15,6 +16,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' as supabase;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
@@ -22,8 +24,10 @@ import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import '../app_localizations.dart';
+import '../services/gemini_service.dart';
 import '../services/google_form_service.dart';
-import 'audio_player_item.dart';
+import '../widget/modal.dart';
+import '../widget/audio_player_item.dart';
 import 'package:mime/mime.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -34,7 +38,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   List<DocumentSnapshot> _chatHistories = []; // Lịch sử nhiều phiên chat từ Firestore
-  List<Map<String, dynamic>> _messages = []; // _messages(role,content)
+  List<Map<String, dynamic>> _messages = [];
   final TextEditingController _controller = TextEditingController();
   final TextEditingController _systemInstructionController = TextEditingController();
   late GenerativeModel _model; // Model để tạo nội dung
@@ -47,7 +51,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isExpanded = false; // Kiểm tra trạng thái mở rộng của modal
   List<Map<String, String>> _suggestions = []; // <name:..., avatarUrl:...>
   List<Map<String, String>> _allCustomNames = [];
-  late StreamSubscription _listener;
+  // late StreamSubscription _listener;
   String? selectedFilePath;
   List<File> _selectedImages = [];
   List<File> _selectedFiles = [];
@@ -56,6 +60,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _searchController = TextEditingController();
   List<DocumentSnapshot> _filteredChatHistories = [];
   StreamSubscription<QuerySnapshot>? _chatHistoriesSubscription;
+  StreamSubscription<QuerySnapshot>? _suggestionsSubscription;
   bool _isLoading = false; // for send message button
   int _selectedIndex = -1;
   final FocusNode _messageFocusNode = FocusNode();
@@ -68,20 +73,29 @@ class _ChatScreenState extends State<ChatScreen> {
   var fbData;
   String gFormUrl = "";
   bool _isLoadingChat = false;
-  String _tokenCount = "";
+  String _tokenCount = "0";
+  final _generateContentApi = 'streamGenerateContent';
+  bool _isSearch = false;
+  bool _isGenImage = false;
+  List<Uri> _selectedYouTubes = [];
+  bool _isAvatarEnabled = false;
+  String _currentChatbotAvatar = '';
 
 
-  final apiKey = "";
+  final apiKey = dotenv.env['API_KEY']!;
   String _selectedModel = 'gemini-2.0-flash';
   double _temperature = 1.0;
   final List<String> _models = [
-    'gemini-1.5-flash-8b',
-    'gemini-1.5-flash',
-    'gemini-1.5-pro',
-    'gemini-2.0-flash-lite-preview-02-05',
+    // 'gemini-1.5-flash-8b',
+    // 'gemini-1.5-flash',
+    // 'gemini-1.5-pro',
+    // 'gemini-2.0-flash-lite-preview-02-05',
+    'gemini-2.0-flash-lite',
     'gemini-2.0-flash',
     'gemini-2.0-pro-exp-02-05',
     'gemini-2.0-flash-thinking-exp-01-21',
+    'gemini-2.5-pro-exp-03-25',
+    // 'gemini-2.0-flash-exp-image-generation',
   ];
   // Tạm thời lưu trữ các giá trị để khôi phục nếu thoát modal mà không nhấn Apply
   late String _tempModel;
@@ -89,12 +103,15 @@ class _ChatScreenState extends State<ChatScreen> {
   late String _tempSystemInstruction;
   late bool _tempIsTemporaryChat;
 
+
   @override
   void initState() {
     super.initState();
     _initializeModel();
     _loadChatHistories();
     _fetchSuggestions();
+    _fetchDefaultBot();
+    _loadAvatarSetting();
 
     // Lắng nghe thay đổi từ ô tìm kiếm chat histories
     _searchController.addListener(() {
@@ -125,9 +142,12 @@ class _ChatScreenState extends State<ChatScreen> {
     _controller.dispose();
     _systemInstructionController.dispose();
     // _scrollController.dispose();
-    _listener.cancel();
+    // _listener.cancel();
     _chatHistoriesSubscription?.cancel();
     _messageFocusNode.dispose();
+
+    _searchController.dispose();
+    _suggestionsSubscription?.cancel();
 
     super.dispose();
   }
@@ -159,22 +179,23 @@ class _ChatScreenState extends State<ChatScreen> {
 
     // Model đặt tên đoạn chat
     _namedModel = GenerativeModel(
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.0-flash-lite',
       apiKey: apiKey,
       systemInstruction: Content.system(
           '''
-          Bạn là chuyên gia đặt tiêu đề tự động cho các cuộc trò chuyện với AI.
-          Nhiệm vụ: Nhận tin nhắn đầu tiên của người dùng và phản hồi từ AI. 
-            Xác định ngôn ngữ của tin nhắn. Tạo tiêu đề cực ngắn (~5 từ), 
-            bằng ngôn ngữ của người dùng, phản ánh chính xác nội dung tin nhắn.
-          Hướng dẫn: Ưu tiên tính ngắn gọn, súc tích và phản ánh đúng 
-            nội dung chính. Sử dụng ngôn ngữ tự nhiên, dễ hiểu. Tập trung vào 
-            các từ khóa quan trọng. Bỏ qua các từ ngữ không cần thiết (ví dụ: 
-            lời chào hỏi, giải thích), chỉ tạo tiêu đề. Nếu không thể tạo tiêu 
-            đề hoàn hảo, hãy chọn những từ khóa quan trọng nhất.
+          You're an AI chat title expert.
+          Task: Use the first user message + AI reply to make a short title (max 5 words) in the same language.
+          Tips: Be clear and concise. Focus on key content. Skip greetings or filler. If unsure, use main keywords.
           '''
       ),
     );
+  }
+
+  Future<void> _loadAvatarSetting() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _isAvatarEnabled = prefs.getBool('isAvatarEnabled') ?? false;
+    });
   }
 
   Future<void> _loadChatHistories() async {
@@ -231,16 +252,17 @@ class _ChatScreenState extends State<ChatScreen> {
     final chatData = chatDoc.data() as Map<String, dynamic>;
     final messages = List<Map<String, dynamic>>.from(chatData['messages']);
 
-    setState(() {
-      _isLoadingChat = true; // Bắt đầu hiển thị loading
-    });
+    // setState(() {
+    //   _isLoadingChat = true; // Bắt đầu hiển thị loading
+    // });
 
     // Chờ 1 chút để tránh chặn UI
-    await Future.delayed(Duration(milliseconds: 300));
+    // await Future.delayed(Duration(milliseconds: 300));
 
     _messages = messages;
     _currentChatId = chatDoc.id; // Gán ID đoạn chat hiện tại
     _currentChatName = chatData['name'] as String?;
+    _currentChatbotAvatar = messages.last['avatar'] ?? '';
     _isFirstMessage = false;
 
     // Tải lại cấu hình từ dữ liệu
@@ -252,9 +274,9 @@ class _ChatScreenState extends State<ChatScreen> {
     // Khởi tạo lại _model với thông số đã tải
     await _updateModelConfigForCurrentChat();
     // _scrollToBottom();
-    setState(() {
-      _isLoadingChat = false; // Ẩn loading khi load xong
-    });
+    // setState(() {
+    //   _isLoadingChat = false; // Ẩn loading khi load xong
+    // });
   }
 
   Future<void> _pickImages() async {
@@ -380,7 +402,7 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       });
     } catch (e) {
-      print("Error starting recording: $e");
+      // print("Error starting recording: $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Không thể bắt đầu ghi âm: $e")),
       );
@@ -401,7 +423,7 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       }
     } catch (e) {
-      print("Error stopping recording: $e");
+      // print("Error stopping recording: $e");
     }
   }
 
@@ -512,7 +534,7 @@ class _ChatScreenState extends State<ChatScreen> {
           spacing: 8.0, // Khoảng cách giữa các phần tử theo chiều ngang
           runSpacing: 8.0, // Khoảng cách giữa các dòng
           children: _selectedImages.map((file) {
-            String fileName = file.path.split('/').last.toLowerCase();
+            String type = _mapMimeTypeToType(lookupMimeType(file.path) ?? 'application/octet-stream');
             return Stack(
               children: [
                 Container(
@@ -523,7 +545,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     borderRadius: BorderRadius.circular(8.0),
                   ),
                   clipBehavior: Clip.hardEdge,
-                  child: _isImagePath(fileName)
+                  child: type == 'image'
                     // Nếu là ảnh, hiển thị ảnh
                     ? Image.file(
                         file,
@@ -553,7 +575,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
 
                 // Nếu file là video, hiển thị biểu tượng video (ở giữa)
-                if (!_isImagePath(fileName))
+                if (type == 'video')
                   Positioned.fill(
                     child: Center(
                       child: Container(
@@ -601,6 +623,104 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  void _removeYoutubePicked(Uri uri) {
+    setState(() {
+      _selectedYouTubes.remove(uri);
+    });
+  }
+
+  Widget _showYoutubePicked() {
+    return _selectedYouTubes.isEmpty ? SizedBox.shrink() : Column(
+      children: [
+        SizedBox(height: 10),
+        Wrap(
+          spacing: 8.0, // Khoảng cách giữa các phần tử theo chiều ngang
+          runSpacing: 8.0, // Khoảng cách giữa các dòng
+          children: _selectedYouTubes.map((uri) {
+            String videoId = _extractYouTubeId(uri);
+            String thumbnailUrl = 'https://img.youtube.com/vi/$videoId/maxresdefault.jpg';
+            return Stack(
+              children: [
+                Container(
+                  width: 50,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(8.0),
+                  ),
+                  clipBehavior: Clip.hardEdge,
+                  child: Image.network(
+                    thumbnailUrl,
+                    fit: BoxFit.cover,
+                  )
+                ),
+
+                // Hiển thị biểu tượng youtube (ở giữa)
+                Positioned.fill(
+                  child: Center(
+                    child: Container(
+                      // padding: const EdgeInsets.all(4.0),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Icon(
+                        Icons.smart_display_rounded,
+                        color: Colors.red,
+                        size: 24,
+                      ),
+                    ),
+                  ),
+                ),
+
+                // Nút X để xóa ảnh/video, đặt ở góc trên bên phải
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: GestureDetector(
+                    onTap: () {
+                      _removeYoutubePicked(uri);
+                    },
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.close,
+                        color: Colors.white,
+                        size: 20,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }).toList(),
+        ),
+        SizedBox(height: 10),
+      ],
+    );
+  }
+
+  String _extractYouTubeId(Uri uri) {
+    final host = uri.host.toLowerCase();
+    final segments = uri.pathSegments;
+
+    if (host.contains('youtu.be')) {
+      return segments.isNotEmpty ? segments[0] : '';
+    }
+
+    if (host.contains('youtube.com')) {
+      if (uri.queryParameters['v'] != null) return uri.queryParameters['v'] ?? '';
+
+      if (segments.isNotEmpty && segments[0] == 'shorts' && segments.length > 1) {
+        return segments[1];
+      }
+    }
+    return '';
+  }
+
   Widget _buildMessageInputRow() {
     return Padding(
       padding: const EdgeInsets.all(8.0),
@@ -609,18 +729,13 @@ class _ChatScreenState extends State<ChatScreen> {
           AnimatedSize(
             duration: Duration(milliseconds: 300),
             curve: Curves.easeInOut,
-            child: _messageFocusNode.hasFocus ? SizedBox.shrink() : IconButton(
-              icon: Icon(Icons.attach_file),
-              onPressed: _pickFiles,
-              iconSize: 24.0,
-              visualDensity: VisualDensity(horizontal: -4),
-            ),
+            child: _messageFocusNode.hasFocus ? SizedBox.shrink() : _showMessageInputRowOptions()
           ),
           AnimatedSize(
             duration: Duration(milliseconds: 300),
             curve: Curves.easeInOut,
             child: _messageFocusNode.hasFocus ? SizedBox.shrink() : IconButton(
-              icon: Icon(Icons.image),
+              icon: Icon(Icons.photo_library),
               onPressed: _pickImages,
               visualDensity: VisualDensity(horizontal: -4),
             ),
@@ -654,6 +769,7 @@ class _ChatScreenState extends State<ChatScreen> {
               child: TextField(
                 focusNode: _messageFocusNode,
                 controller: _controller,
+                textCapitalization: TextCapitalization.sentences,
                 autofocus: false,
                 decoration: InputDecoration(
                   hintText: AppLocalizations.of(context).translate('type_a_message'),
@@ -666,6 +782,24 @@ class _ChatScreenState extends State<ChatScreen> {
                     borderRadius: BorderRadius.circular(25.0),
                     borderSide: BorderSide.none,
                   ),
+                  // Đặt biểu tượng vào prefixIcon
+                  prefixIcon: (_messageFocusNode.hasFocus && !_isSearch)
+                      ? null
+                      : GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            // Khi nhấn vào biểu tượng, thay đổi màu
+                            _isSearch = !_isSearch;
+                            _isGenImage = false;
+                          });
+                        },
+                        child: Icon(
+                          Icons.public,
+                          color: _isSearch
+                              ? Colors.blue // Màu khi được chọn
+                              : Theme.of(context).colorScheme.onSurface, // Màu khi không được chọn
+                        ),
+                      ),
                 ),
                 textInputAction: TextInputAction.newline, // Cho phép xuống dòng
                 minLines: 1,
@@ -700,21 +834,29 @@ class _ChatScreenState extends State<ChatScreen> {
               // Tạo bản sao của danh sách file để truyền cho hàm xử lý
               final List<File> imagesToSend = List<File>.from(_selectedImages);
               final List<File> filesToSend = List<File>.from(_selectedFiles);
+              final List<Uri> urlYTsToSend = List<Uri>.from(_selectedYouTubes);
               final String textToSend = _controller.text;
 
               // Cập nhật giao diện ngay: Clear danh sách các file và cập nhật loading
               setState(() {
                 _selectedImages.clear();
                 _selectedFiles.clear();
+                _selectedYouTubes.clear();
                 _controller.clear();
                 _isLoading = true; // Bắt đầu loading
               });
 
               // Gửi tin nhắn dựa trên điều kiện có ảnh hoặc file được chọn hay không
-              if (imagesToSend.isNotEmpty || filesToSend.isNotEmpty) {
-                await _sendMessage([imagesToSend, filesToSend, textToSend]);
+              if (imagesToSend.isNotEmpty || filesToSend.isNotEmpty || urlYTsToSend.isNotEmpty) {
+                await _sendMessage([imagesToSend, filesToSend, urlYTsToSend, textToSend]);
               } else {
-                await _sendMessage(textToSend);
+                if (_isSearch) {
+                  _sendToGeminiService(textToSend, includeTools: true);
+                } else if (_isGenImage) {
+                  _sendToGeminiService(textToSend, selectedModel: "gemini-2.0-flash-exp-image-generation", generateImage: true);
+                } else {
+                  await _sendMessage(textToSend);
+                }
               }
 
               setState(() {
@@ -727,6 +869,295 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _showMessageInputRowOptions() {
+    return Padding(
+      padding: EdgeInsets.only(left: 8,right: 8,),
+      child: PopupMenuButton<int>(
+        onSelected: (value) {
+          // Xử lý khi người dùng chọn một mục trong menu
+          if (value == 1) {
+            _pickFiles();
+          } else if (value == 2) {
+            if (_selectedYouTubes.isEmpty) {
+              setState(() {
+                _isGenImage = !_isGenImage;
+                _isSearch = false;
+              });
+            }
+          } else if (value == 3) {
+            _showYouTubeLinkDialog(context);
+          }
+        },
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12), // Bo góc toàn bộ popup
+        ),
+        itemBuilder: (BuildContext context) {
+          return [
+            PopupMenuItem<int>(
+              value: 1, // Giá trị cho mục này
+              child: Row(
+                children: [
+                  Icon(Icons.file_present_rounded),
+                  SizedBox(width: 8),
+                  Text(AppLocalizations.of(context).translate('pick_files')),
+                ],
+              ),
+            ),
+            PopupMenuItem<int>(
+              value: 2,
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.palette,
+                    color: _isGenImage
+                      ? Colors.blue // Màu khi được chọn
+                      : Theme.of(context).colorScheme.onSurface,
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    AppLocalizations.of(context).translate('create_image'),
+                    style: TextStyle(
+                      color: _isGenImage
+                        ? Colors.blue // Màu khi được chọn
+                        : Theme.of(context).colorScheme.onSurface,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            PopupMenuItem<int>(
+              value: 3,
+              child: Row(
+                children: [
+                  Icon(Icons.smart_display_rounded),
+                  SizedBox(width: 8),
+                  Text('YouTube'),
+                ],
+              ),
+            ),
+          ];
+        },
+        child: Icon(
+          Icons.add_circle,
+          color: _isGenImage
+              ? Colors.blue // Màu khi được chọn
+              : Theme.of(context).colorScheme.onSurface,
+        ),
+      ),
+    );
+  }
+
+  // Future<void> _youtube() async {
+  //   final geminiService = GeminiService(
+  //     geminiApiKey: apiKey,
+  //     modelId: _selectedModel,
+  //     generateContentApi: _generateContentApi,
+  //   );
+  //   final historyJson = _chat.history.map((e) => e.toJson()).toList();
+  //
+  //   try {
+  //     final response = await geminiService.generateContent(
+  //       userInput: 'INSERT_INPUT_HERE',
+  //       chatHistory: historyJson,
+  //       // videoUrl: 'https://youtu.be/W3WY0TVVqs8',
+  //     );
+  //     print('Response from Gemini API: $response');
+  //   } catch (e) {
+  //     print('Error: $e');
+  //   }
+  // }
+
+  Future<void> _sendToGeminiService(String userInput,
+      {
+        bool includeTools = false,
+        String? selectedModel,
+        bool generateImage = false,
+      }) async {
+    if (userInput.trim().isEmpty) return;
+    // Nếu không truyền selectedModel, sử dụng giá trị mặc định (_selectedModel)
+    selectedModel ??= _selectedModel;
+    final geminiService = GeminiService(
+      geminiApiKey: apiKey,
+      modelId: selectedModel,
+      generateContentApi: _generateContentApi,
+    );
+    final historyJson = _chat.history.map((e) => e.toJson()).toList();
+
+    try {
+      setState(() {
+        _messages.add({'role': 'user', 'content': userInput, 'type': 'text'});
+      });
+
+      // Xóa @... trước khi gửi cho model
+      String messageToModel = await _filterWords(userInput);
+
+      final response = geminiService.generateContent(
+        userInput: messageToModel,
+        chatHistory: historyJson,
+        includeTools: includeTools,
+        generateImage: generateImage,
+        systemInstruction: _systemInstructionController.text.trim().isEmpty || generateImage
+            ? null
+            : _systemInstructionController.text.trim(),
+      );
+      // final response = Stream.fromIterable(['"data": "aádasfsfagasz"']);
+
+
+      final buffer = StringBuffer();
+      String responseText = "";
+      setState(() {
+        _messages.add({'role': 'assistant', 'content': responseText, 'type': 'text', 'avatar': _currentChatbotAvatar});
+      });
+      await for (var res in response) {
+        // Kiểm tra nếu là ảnh base64
+        if (res.startsWith('"data": "')) {
+          // print("res:$res");
+          final base64Data = res.substring(9, res.length-1);
+          final imageBytes = base64Decode(base64Data);
+
+          // Tải tệp lên Supabase Storage
+          final fileName = 'gemini_genimage_${DateTime.now()}';
+          final response = await supabase.Supabase.instance.client.storage
+              .from('ai-chat-bucket')
+              .uploadBinary(fileName, imageBytes);
+          final String publicUrl = supabase.Supabase.instance.client.storage
+              .from('ai-chat-bucket')
+              .getPublicUrl(fileName);
+
+          setState(() {
+            _messages.last['content'] = publicUrl;
+            _messages.last['type'] = 'image';
+          });
+        } else { // Nếu là text, tiếp tục ghi vào buffer
+          buffer.write(res);
+          setState(() {
+            // Nếu message hiện tại là text đang build thì update
+            if (_messages.last['type'] == 'text') {
+              _messages.last['content'] = buffer.toString();
+            } else {
+              // Nếu chưa có hoặc trước đó là ảnh, thêm message text mới
+              _messages.add({'role': 'assistant', 'content': buffer.toString(), 'type': 'text', 'avatar': _currentChatbotAvatar});
+            }
+          });
+        }
+      }
+      final lastMsType = _messages[_messages.length - 1]['type'];
+      if (lastMsType == 'text') {
+        responseText = buffer.toString();
+        setState(() {
+          _messages[_messages.length - 1]['content'] = responseText;
+        });
+      }
+
+      if (_isFirstMessage) {
+        // Đặt tên cho đoạn chat khi gửi tin nhắn đầu tiên
+        final nameResponse = await _namedModel.startChat(history: []).sendMessage(
+          Content.text('''user message: $messageToModel;
+                          AI response: $responseText'''),
+        );
+        setState(() {
+          _currentChatName = nameResponse.text == null ?
+          'Unnamed Chat' : nameResponse.text!.trim();
+        });
+        _isFirstMessage = false;
+      }
+      if (!_isTemporaryChat) {
+        // Tự động lưu đoạn chat sau mỗi tin nhắn
+        _saveCurrentChat();
+      }
+    } catch (e) {
+      // print('Error: $e');
+    }
+  }
+
+  void _showYouTubeLinkDialog(BuildContext context) {
+    TextEditingController? ytController = TextEditingController();
+    String? previewUrl;
+
+    // Hiển thị dialog
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text('Enter YouTube Link'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: ytController,
+                    onChanged: (url) {
+                      if (url.isNotEmpty && _isValidYouTubeURL(url)) {
+                        // Xử lý URL YouTube hợp lệ
+                        Uri uri = Uri.parse(url);
+                        String ytId = _extractYouTubeId(uri);
+                        setState(() {
+                          previewUrl = 'https://img.youtube.com/vi/$ytId/maxresdefault.jpg';
+                        });
+                      }
+                    },
+                    decoration: InputDecoration(
+                      hintText: 'Enter YouTube URL',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(18)),
+                    ),
+                  ),
+                  SizedBox(height: 10),
+                  if (previewUrl != null)
+                    ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: _buildYouTubeWidget(previewUrl!),
+                    ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    // Đóng dialog
+                    Navigator.pop(context);
+                    ytController = null;
+                  },
+                  child: Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    // Kiểm tra URL có hợp lệ không
+                    String url = ytController!.text;
+                    if (url.isNotEmpty && _isValidYouTubeURL(url)) {
+                      // Xử lý URL YouTube hợp lệ
+                      setState(() {
+                        _selectedYouTubes.add(Uri.parse(url));
+                      });
+                      Navigator.pop(context);
+                      ytController = null;
+                    } else {
+                      // Thông báo nếu URL không hợp lệ
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Invalid YouTube URL')),
+                      );
+                    }
+                  },
+                  child: Text('OK'),
+                ),
+              ],
+            );
+          }
+        );
+      },
+    ).whenComplete(() {
+      ytController?.dispose();
+    });
+  }
+
+  // Hàm kiểm tra URL có phải là YouTube không
+  bool _isValidYouTubeURL(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return false;
+    final host = uri.host.toLowerCase();
+    return host.contains('youtube.com') || host.contains('youtu.be');
+  }
+
+  // TODO: gform
   Future<String> _filterWords(String input) async {
     // Các biến để lưu kết quả
     List<String> slashStrings = [];
@@ -756,7 +1187,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // Bước 1: Tải và giải mã dữ liệu
       fbData = await fetchFBPublicLoadData(gFormUrl);
       if (fbData == null) {
-        print("Lỗi khi tải FB_PUBLIC_LOAD_DATA_");
+        // print("Lỗi khi tải FB_PUBLIC_LOAD_DATA_");
         return "Lỗi khi tải FB_PUBLIC_LOAD_DATA_";
       }
 
@@ -818,14 +1249,24 @@ class _ChatScreenState extends State<ChatScreen> {
       int fileMessageStartIndex = _messages.length;
 
       for (var item in userMessage) {
-        if (item is List<File>) {
-          for (var file in item) {
+        // Nếu là danh sách uri YouTube
+        if (item is List<Uri>) {
+          for (var uri in item) {
             setState(() {
-              _messages.add({'role': 'user', 'content': file.path});
+              _messages.add({'role': 'user', 'content':uri.toString(), 'type': 'youtube'});
             });
+            contentPart.add(FilePart(uri));
+          }
+        } // Nếu là danh sách file
+        else if (item is List<File>) {
+          for (var file in item) {
             final bytes = await file.readAsBytes();
             final mimeType = lookupMimeType(file.path) ??
                 'application/octet-stream';
+            final type = _mapMimeTypeToType(mimeType);
+            setState(() {
+              _messages.add({'role': 'user', 'content': file.path, 'type': type});
+            });
             contentPart.add(DataPart(mimeType, bytes));
 
             if (!_isTemporaryChat) {
@@ -854,10 +1295,11 @@ class _ChatScreenState extends State<ChatScreen> {
               }
             });
           }
-        } else if (item is String) {
+        } // Nếu là tin nhắn text
+        else if (item is String) {
           if (item.trim().isNotEmpty) {
             setState(() {
-              _messages.add({'role': 'user', 'content': item});
+              _messages.add({'role': 'user', 'content': item, 'type': 'text'});
             });
             // Xóa @... trước khi gửi cho model
             messageToModel = await _filterWords(item);
@@ -873,12 +1315,12 @@ class _ChatScreenState extends State<ChatScreen> {
       content = Content.multi(contentPart);
     } else if (userMessage is String) {
       setState(() {
-        _messages.add({'role': 'user', 'content': userMessage});
+        _messages.add({'role': 'user', 'content': userMessage, 'type': 'text'});
       });
 
       // Xóa @... trước khi gửi cho model
       messageToModel = await _filterWords(userMessage);
-      print(messageToModel);
+      // print(messageToModel);
       content = Content.text(messageToModel);
     }
 
@@ -886,24 +1328,41 @@ class _ChatScreenState extends State<ChatScreen> {
     // _scrollToBottom(); //TODO: Nếu dữ liệu messages được lấy từ một Stream hoặc Future, gọi _scrollToBottom sau khi dữ liệu được cập nhật
 
     try {
-      final response = await _chat.sendMessage(content!); // Gửi tin nhắn
-      String responseText = response.text ?? 'No response from AI'; // Xử lý giá trị null
+      // final response = await _chat.sendMessage(content!); // Gửi tin nhắn
+      // String responseText = response.text ?? 'No response from AI'; // Xử lý giá trị null
+
+      // TODO: Stream Message
+      StringBuffer responseTextBuffer = StringBuffer();
+      String responseText = "";
+      final response = _chat.sendMessageStream(content!); // Gửi tin nhắn
+      setState(() {
+        _messages.add({'role': 'assistant', 'content': responseText, 'type': 'text', 'avatar': _currentChatbotAvatar});
+      });
+      await for (var chunk in response) {
+        // responseText += chunk.text ?? '';
+        responseTextBuffer.write(chunk.text ?? '');
+        setState(() {
+          _messages[_messages.length - 1]['content'] = responseTextBuffer.toString();
+        });
+      }
+      responseText = responseTextBuffer.toString();
+
       String preFilledGFormLink = _getPreFilledGFormLink(responseText);
       if (preFilledGFormLink.isNotEmpty) {
         responseText += "\n👉 [pre-filled form]($preFilledGFormLink)";
       }
-      setState(() {
-        _messages.add({
-          'role': 'assistant',
-          'content': responseText,
-        });
-      });
+      // setState(() {
+      //   _messages.add({
+      //     'role': 'assistant',
+      //     'content': responseText,
+      //   });
+      // });
       // _scrollToBottom();
 
       if (_isFirstMessage) {
         // Đặt tên cho đoạn chat khi gửi tin nhắn đầu tiên
         final nameResponse = await _namedModel.startChat(history: []).sendMessage(
-          Content.text('''user message: $messageToModel; 
+          Content.text('''user message: $messageToModel;
                           AI response: $responseText'''),
         );
         setState(() {
@@ -918,19 +1377,28 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     } catch (e) {
       setState(() {
-        _messages.add({'role': 'error', 'content': 'Error: $e'});
+        _messages.add({'role': 'error', 'content': 'Error: $e', 'type': 'text'});
       });
     }
+  }
+
+  String _mapMimeTypeToType(String mimeType) {
+    if (mimeType.startsWith('image/')) return 'image';
+    if (mimeType.startsWith('video/')) return 'video';
+    if (mimeType.startsWith('audio/')) return 'audio';
+    if (mimeType == 'application/pdf') return 'pdf';
+    if (mimeType.startsWith('text/')) return 'text';
+    return 'file'; // fallback cho các loại khác
   }
 
   /// Hàm xóa tin nhắn.
   Future<void> _deleteMessage(int index) async {
     final message = _messages[index];
     final content = message['content'] ?? '';
+    final type = message['type'] ?? '';
 
-    // Nếu tin nhắn là file (ví dụ: chứa đuôi .png, .jpg)
-    if (_isFilePath(content)) {
-      // print("_isFilePath: $content");
+    // Nếu tin nhắn là file
+    if (type != 'text' && type != 'youtube') {
       try {
         // Phân tích URL để lấy tên file.
         final uri = Uri.parse(content);
@@ -943,11 +1411,11 @@ class _ChatScreenState extends State<ChatScreen> {
               .from('ai-chat-bucket')
               .remove([fileName]);
 
-          print('xóa file từ Supabase: ${response.last.name}');
+          // print('xóa file từ Supabase: ${response.last.name}');
         }
       } catch (e) {
         // Log lỗi nếu phân tích URL thất bại hoặc lỗi trong quá trình xóa file.
-        print('Lỗi khi xử lý xóa file: $e');
+        // print('Lỗi khi xử lý xóa file: $e');
       }
     }
 
@@ -964,7 +1432,7 @@ class _ChatScreenState extends State<ChatScreen> {
             .doc(_currentChatId)
             .update({'messages': _messages});
       } catch (e) {
-        print('Lỗi khi cập nhật Firestore: $e');
+        // print('Lỗi khi cập nhật Firestore: $e');
       }
     }
     // Sau khi lưu, làm mới danh sách
@@ -986,7 +1454,10 @@ class _ChatScreenState extends State<ChatScreen> {
         _currentChatName = null;
         _isFirstMessage = true;
         _selectedIndex = -1;
+        _tokenCount = "0";
+        _currentChatbotAvatar = '';
       });
+      _fetchDefaultBot();
     }
     await _updateModelConfigForCurrentChat();
   }
@@ -1001,24 +1472,46 @@ class _ChatScreenState extends State<ChatScreen> {
       final msg = _messages[i];
       final String content = msg['content']!;
       final bool isUser = msg['role'] == 'user';
+      final String type = msg['type'];
 
       // if (Uri.tryParse(content)?.hasAbsolutePath ?? false) {
-      if (content.startsWith('http')){
-        // Xử lý tin nhắn chứa URL
+      // if (content.startsWith('http')){
+      if (type != 'text'){
+        // Xử lý tin nhắn là file
         List<Part> parts = [];
-        while (i < _messages.length && _messages[i]['content']!.startsWith('http')) {
-          DataPart? filePart = await _fetchUrlAsDataPart(_messages[i]['content']!);
-          if (filePart != null) {
+        // while (i < _messages.length && _messages[i]['content']!.startsWith('http')) {
+        while (i < _messages.length && _messages[i]['type'] != 'text') {
+          // Nếu là URL YouTube
+          if ((_messages[i]['type']) == 'youtube') {
+            FilePart filePart = FilePart(Uri.parse(_messages[i]['content']));
             parts.add(filePart);
+          } else { // Nếu là URL thường
+            DataPart? filePart = await _fetchUrlAsDataPart(_messages[i]['content']!);
+            if (filePart != null) {
+              parts.add(filePart);
+            }
           }
           i++; // Di chuyển đến tin nhắn tiếp theo
         }
         // Nếu tin nhắn tiếp theo là text từ user → thêm nó vào nhóm chung với file
-        if (i < _messages.length && _messages[i]['role'] == 'user') {
+        // if (i < _messages.length && _messages[i]['role'] == 'user') {
+        //   parts.add(TextPart(_messages[i]['content']!));
+        //   i++; // Tiếp tục bỏ qua tin nhắn đã dùng
+        // }
+        // history.add(Content.multi(parts));
+
+        // (TEST)
+        // Nếu tin nhắn tiếp theo là TEXT → gom luôn vào
+        // if (i < _messages.length && !_messages[i]['content']!.startsWith('http')) {
+        if (i < _messages.length && _messages[i]['type'] == 'text') {
           parts.add(TextPart(_messages[i]['content']!));
-          i++; // Tiếp tục bỏ qua tin nhắn đã dùng
+          i++;
         }
-        history.add(Content.multi(parts));
+        // Add vào history tùy theo role của người gửi file ban đầu
+        history.add(isUser
+            ? Content.multi(parts)
+            : Content.model(parts));
+
         i--; // Giảm lại (vì while có thể tăng i quá mức) vì vòng for sẽ tự động tăng i
         continue;
 
@@ -1081,7 +1574,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // print("mimeType: $mimeType");
       return DataPart(mimeType, response.data);
     } catch (e) {
-      print('Lỗi tải dữ liệu từ URL: $e');
+      // print('Lỗi tải dữ liệu từ URL: $e');
       return null;
     }
   }
@@ -1155,7 +1648,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   if (messages != null) {
                     for (final message in messages) {
                       final content = message['content'];
-                      if (content.startsWith('http')){
+                      final type = message['type'];
+                      if (type != 'text' && type != 'youtube'){
                         // print("ishttp: $content");
                         final fileName = Uri.parse(content).pathSegments.last;
                         await supabase.Supabase.instance.client.storage
@@ -1179,202 +1673,229 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _openModelConfigModal() {
-    // Lưu trữ giá trị tạm thời để khôi phục nếu thoát modal
-    _tempModel = _selectedModel;
-    _tempTemperature = _temperature;
-    _tempSystemInstruction = _systemInstructionController.text.trim().isEmpty
-        ? ''
-        : _systemInstructionController.text;
-    _tempIsTemporaryChat = _isTemporaryChat;
+  // void _openModelConfigModal() {
+  //   // Lưu trữ giá trị tạm thời để khôi phục nếu thoát modal
+  //   _tempModel = _selectedModel;
+  //   _tempTemperature = _temperature;
+  //   _tempSystemInstruction = _systemInstructionController.text.trim().isEmpty
+  //       ? ''
+  //       : _systemInstructionController.text;
+  //   _tempIsTemporaryChat = _isTemporaryChat;
+  //   TextEditingController tempSIController = TextEditingController(text: _tempSystemInstruction);
+  //
+  //   showModalBottomSheet(
+  //     context: context,
+  //     isScrollControlled: true, // Cho phép modal mở rộng dựa trên kích thước bàn phím
+  //     builder: (context) {
+  //       return StatefulBuilder(
+  //         builder: (context, setModalState) {
+  //           // Sử dụng Future.delayed để thực hiện tính toán token sau khi modal được mở
+  //           Future.delayed(Duration(milliseconds: 1000), () async {
+  //             var tokenCount = await _model.countTokens(_chat.history);
+  //             setModalState(() {
+  //               // Cập nhật giao diện sau khi có kết quả token
+  //               _tokenCount = tokenCount.totalTokens.toString();
+  //             });
+  //           });
+  //
+  //           return Padding(
+  //             padding: EdgeInsets.only(
+  //               left: 16,
+  //               right: 16,
+  //               top: 16,
+  //               bottom: MediaQuery.of(context).viewInsets.bottom, // Thêm khoảng trống cho bàn phím
+  //             ),
+  //             child: SingleChildScrollView( // Cho phép cuộn nội dung (ko cần)
+  //               child: Column(
+  //                   mainAxisSize: MainAxisSize.min,
+  //                   children: [
+  //                     Text('Model Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+  //                     SizedBox(height: 20),
+  //                     DropdownButtonFormField<String>(
+  //                       decoration: InputDecoration(
+  //                         labelText: 'Model',
+  //                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+  //                         prefixIcon: Icon(Icons.memory), // Biểu tượng chip/AI
+  //                       ),
+  //                       value: _tempModel,
+  //                       items: _models.map((model) {
+  //                         return DropdownMenuItem(
+  //                           value: model,
+  //                           child: Text(model),
+  //                         );
+  //                       }).toList(),
+  //                       onChanged: (value) {
+  //                         setModalState(() {
+  //                           _tempModel = value!;
+  //                         });
+  //                       },
+  //                     ),
+  //                     SizedBox(height: 10),
+  //                     // Total tokens
+  //                     Align(
+  //                       alignment: Alignment.center,
+  //                       child: Container(
+  //                         margin: EdgeInsets.symmetric(vertical: 10), // Tạo khoảng cách
+  //                         padding: EdgeInsets.all(8),
+  //                         decoration: BoxDecoration(
+  //                           color: Colors.blueAccent.withOpacity(0.1),
+  //                           borderRadius: BorderRadius.circular(8),
+  //                         ),
+  //                         child: Text(
+  //                           'Total tokens: $_tokenCount',
+  //                           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blueAccent),
+  //                         ),
+  //                       ),
+  //                     ),
+  //                     Row(
+  //                       children: [
+  //                         Icon(Icons.thermostat, color: Colors.red), // Biểu tượng lửa cho temperature
+  //                         SizedBox(width: 5),
+  //                         Text('Temperature', style: TextStyle(fontSize: 16),),
+  //                         Expanded(
+  //                           child: Slider(
+  //                             min: 0.0,
+  //                             max: 2.0,
+  //                             divisions: 20,
+  //                             value: _tempTemperature,
+  //                             onChanged: (value) {
+  //                               setModalState(() {
+  //                                 _tempTemperature = value;
+  //                               });
+  //                             },
+  //                           ),
+  //                         ),
+  //                         SizedBox(
+  //                           width: 50,
+  //                           height: 50,
+  //                           child: TextField(
+  //                             decoration: InputDecoration(border: OutlineInputBorder()),
+  //                             controller: TextEditingController(
+  //                                 text: _tempTemperature.toStringAsFixed(1)
+  //                             ),
+  //                             keyboardType: TextInputType.number,
+  //                             onChanged: (value) {
+  //                               final temp = double.tryParse(value);
+  //                               if (temp != null && temp >= 0 && temp <= 2) {
+  //                                 setModalState(() {
+  //                                   _tempTemperature = temp;
+  //                                 });
+  //                               }
+  //                             },
+  //                           ),
+  //                         ),
+  //                       ],
+  //                     ),
+  //                     SizedBox(height: 10), // Thêm một khoảng cách dọc 10 pixels giữa các widget
+  //                     // Thêm switch button cho Temporary Chat
+  //                     ListTileTheme(
+  //                       contentPadding: EdgeInsets.zero, // Xóa khoảng thụt lề mặc định
+  //                       child: SwitchListTile(
+  //                         title: Row(
+  //                           children: [
+  //                             Icon(Icons.chat_bubble_outline, color: Colors.blue), // Biểu tượng chat
+  //                             SizedBox(width: 5),
+  //                             Text('Temporary Chat', style: TextStyle(fontSize: 16)),
+  //                           ],
+  //                         ),
+  //                         value: _tempIsTemporaryChat,
+  //                         onChanged: (value) {
+  //                           setModalState(() {
+  //                             _tempIsTemporaryChat = value;
+  //                           });
+  //                         },
+  //                         // Màu nút gạt khi bật
+  //                         // activeColor: Theme.of(context).primaryColor,
+  //                         // Màu track khi bật (dải bên dưới nút gạt)
+  //                         // activeTrackColor: Theme.of(context).primaryColor.withOpacity(0.5),
+  //                         inactiveThumbColor: Colors.grey,           // Màu nút gạt khi tắt
+  //                         // inactiveTrackColor: Theme.of(context).colorScheme.onSurface,
+  //                         // dense: true, // Giảm chiều cao tile nếu muốn
+  //                       ),
+  //                     ),
+  //                     SizedBox(height: 10),
+  //                     AnimatedContainer(
+  //                       duration: Duration(milliseconds: 300),
+  //                       curve: Curves.easeInOut,
+  //                       height: _isExpanded ? MediaQuery.of(context).size.height * 0.6 : 60, // *0.6 giảm độ cao của modal so với *1 ??
+  //                       child: TextField(
+  //                         decoration: InputDecoration(
+  //                           labelText: 'System Instructions',
+  //                           border: OutlineInputBorder(
+  //                             borderRadius: BorderRadius.circular(30.0)
+  //                           ),
+  //                           suffixIcon: IconButton(
+  //                             icon: Icon(_isExpanded ? Icons.fullscreen_exit : Icons.fullscreen),
+  //                             onPressed: () {
+  //                               setModalState(() {
+  //                                 _isExpanded = !_isExpanded;
+  //                               });
+  //                             },
+  //                           ),
+  //                         ),
+  //                         minLines: _isExpanded ? null : 1,
+  //                         maxLines: _isExpanded ? 30 : 3, // Tối đa 3 dòng hoặc không giới hạn
+  //                         controller: tempSIController,
+  //                         onChanged: (value) {
+  //                           _tempSystemInstruction = value;
+  //                         },
+  //                       ),
+  //                     ),
+  //                     ElevatedButton(
+  //                       onPressed: () async {
+  //                         setState(() {
+  //                           _selectedModel = _tempModel;
+  //                           _temperature = _tempTemperature;
+  //                           _systemInstructionController.text =
+  //                               _tempSystemInstruction;
+  //                           _isTemporaryChat = _tempIsTemporaryChat;
+  //                         });
+  //                         await _updateModelConfigForCurrentChat();
+  //
+  //                         Navigator.pop(context);
+  //                         ScaffoldMessenger.of(context).showSnackBar(
+  //                           SnackBar(content: Text('Model configuration updated.')),
+  //                         );
+  //                       },
+  //                       child: Text('Apply'),
+  //                     ),
+  //                   ],
+  //                 ),
+  //             ),
+  //           );
+  //         },
+  //       );
+  //     },
+  //   );
+  // }
 
+  void _openModelConfigModal() {
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true, // Cho phép modal mở rộng dựa trên kích thước bàn phím
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            // Sử dụng Future.delayed để thực hiện tính toán token sau khi modal được mở
-            Future.delayed(Duration(milliseconds: 100), () async {
-              var tokenCount = await _model.countTokens(_chat.history);
-              setModalState(() {
-                // Cập nhật giao diện sau khi có kết quả token
-                _tokenCount = tokenCount.totalTokens.toString();
-              });
-            });
-
-            return Padding(
-              padding: EdgeInsets.only(
-                left: 16,
-                right: 16,
-                top: 16,
-                bottom: MediaQuery.of(context).viewInsets.bottom, // Thêm khoảng trống cho bàn phím
-              ),
-              child: SingleChildScrollView( // Cho phép cuộn nội dung (ko cần)
-                child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('Model Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                      SizedBox(height: 20),
-                      DropdownButtonFormField<String>(
-                        decoration: InputDecoration(
-                          labelText: 'Model',
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                          prefixIcon: Icon(Icons.memory), // Biểu tượng chip/AI
-                        ),
-                        value: _tempModel,
-                        items: _models.map((model) {
-                          return DropdownMenuItem(
-                            value: model,
-                            child: Text(model),
-                          );
-                        }).toList(),
-                        onChanged: (value) {
-                          setModalState(() {
-                            _tempModel = value!;
-                          });
-                        },
-                      ),
-                      SizedBox(height: 10),
-                      // Total tokens
-                      Align(
-                        alignment: Alignment.center,
-                        child: Container(
-                          margin: EdgeInsets.symmetric(vertical: 10), // Tạo khoảng cách
-                          padding: EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.blueAccent.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            'Total tokens: $_tokenCount',
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blueAccent),
-                          ),
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          Icon(Icons.thermostat, color: Colors.red), // Biểu tượng lửa cho temperature
-                          SizedBox(width: 5),
-                          Text('Temperature', style: TextStyle(fontSize: 16),),
-                          Expanded(
-                            child: Slider(
-                              min: 0.0,
-                              max: 2.0,
-                              divisions: 20,
-                              value: _tempTemperature,
-                              onChanged: (value) {
-                                setModalState(() {
-                                  _tempTemperature = value;
-                                });
-                              },
-                            ),
-                          ),
-                          SizedBox(
-                            width: 50,
-                            height: 50,
-                            child: TextField(
-                              decoration: InputDecoration(border: OutlineInputBorder()),
-                              controller: TextEditingController(
-                                  text: _tempTemperature.toStringAsFixed(1)
-                              ),
-                              keyboardType: TextInputType.number,
-                              onChanged: (value) {
-                                final temp = double.tryParse(value);
-                                if (temp != null && temp >= 0 && temp <= 2) {
-                                  setModalState(() {
-                                    _tempTemperature = temp;
-                                  });
-                                }
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                      SizedBox(height: 10), // Thêm một khoảng cách dọc 10 pixels giữa các widget
-                      // Thêm switch button cho Temporary Chat
-                      ListTileTheme(
-                        contentPadding: EdgeInsets.zero, // Xóa khoảng thụt lề mặc định
-                        child: SwitchListTile(
-                          title: Row(
-                            children: [
-                              Icon(Icons.chat_bubble_outline, color: Colors.blue), // Biểu tượng chat
-                              SizedBox(width: 5),
-                              Text('Temporary Chat', style: TextStyle(fontSize: 16)),
-                            ],
-                          ),
-                          value: _tempIsTemporaryChat,
-                          onChanged: (value) {
-                            setModalState(() {
-                              _tempIsTemporaryChat = value;
-                            });
-                          },
-                          // Màu nút gạt khi bật
-                          // activeColor: Theme.of(context).primaryColor,
-                          // Màu track khi bật (dải bên dưới nút gạt)
-                          // activeTrackColor: Theme.of(context).primaryColor.withOpacity(0.5),
-                          inactiveThumbColor: Colors.grey,           // Màu nút gạt khi tắt
-                          // inactiveTrackColor: Theme.of(context).colorScheme.onSurface,
-                          // dense: true, // Giảm chiều cao tile nếu muốn
-                        ),
-                      ),
-                      SizedBox(height: 10),
-                      AnimatedContainer(
-                        duration: Duration(milliseconds: 300),
-                        curve: Curves.easeInOut,
-                        height: _isExpanded ? MediaQuery.of(context).size.height * 0.6 : 60, // *0.6 giảm độ cao của modal so với *1 ??
-                        child: TextField(
-                          decoration: InputDecoration(
-                            labelText: 'System Instructions',
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(30.0)
-                            ),
-                            suffixIcon: IconButton(
-                              icon: Icon(_isExpanded ? Icons.fullscreen_exit : Icons.fullscreen),
-                              onPressed: () {
-                                setModalState(() {
-                                  _isExpanded = !_isExpanded;
-                                });
-                              },
-                            ),
-                          ),
-                          minLines: _isExpanded ? null : 1,
-                          maxLines: _isExpanded ? 30 : 3, // Tối đa 3 dòng hoặc không giới hạn
-                          controller: TextEditingController(
-                            text: _tempSystemInstruction,
-                          ),
-                          onChanged: (value) {
-                            _tempSystemInstruction = value;
-                          },
-                        ),
-                      ),
-                      ElevatedButton(
-                        onPressed: () async {
-                          setState(() {
-                            _selectedModel = _tempModel;
-                            _temperature = _tempTemperature;
-                            _systemInstructionController.text =
-                                _tempSystemInstruction;
-                            _isTemporaryChat = _tempIsTemporaryChat;
-                          });
-                          await _updateModelConfigForCurrentChat();
-
-                          Navigator.pop(context);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Model configuration updated.')),
-                          );
-                        },
-                        child: Text('Apply'),
-                      ),
-                    ],
-                  ),
-              ),
-            );
-          },
-        );
-      },
+      isScrollControlled: true,
+      builder: (context) => ModelConfigModal(
+        selectedModel: _selectedModel,
+        temperature: _temperature,
+        systemInstruction: _systemInstructionController.text,
+        isTemporaryChat: _isTemporaryChat,
+        availableModels: _models,
+        countTokens: () async => (await _model.countTokens(_chat.history)).totalTokens,
+        onApply: (model, temp, systemInstruction, isTemp) async {
+          setState(() {
+            _selectedModel = model;
+            _temperature = temp;
+            _systemInstructionController.text = systemInstruction;
+            _isTemporaryChat = isTemp;
+          });
+          await _updateModelConfigForCurrentChat();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Model configuration updated.')),
+          );
+        },
+      ),
     );
   }
+
 
   void _showChatOptions(LongPressStartDetails details, DocumentSnapshot chatDoc) async {
     final chatData = chatDoc.data() as Map<String, dynamic>;
@@ -1430,6 +1951,35 @@ class _ChatScreenState extends State<ChatScreen> {
   //   });
   // }
 
+  Future<void> _fetchDefaultBot() async {
+    final currentUserId = _currentUser?.uid;
+
+    try {
+      final userSnapshot = await FirebaseFirestore.instance
+          .collection('chatbot_customizations')
+          .where('userId', whereIn: [currentUserId, ""]) // Lấy cả userId hiện tại và userId rỗng
+          .where('isDefault', isEqualTo: true)
+          .get();
+
+      // Kiểm tra nếu có tài liệu phù hợp
+      if (userSnapshot.docs.isNotEmpty) {
+        // Lấy description từ tài liệu đầu tiên
+        final description = userSnapshot.docs.first['chatbotDescription'];
+        if (description != null) {
+          setState(() {
+            _systemInstructionController.text = description;
+          });
+        }
+        await _updateModelConfigForCurrentChat();
+      }
+    } catch (e) {
+      // Xử lý lỗi (nếu có)
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error fetching default bot: $e")),
+      );
+    }
+  }
+
   void _fetchSuggestions() {
     final currentUserId = _currentUser?.uid;
     // 2 biến tạm để lưu kết quả của từng truy vấn
@@ -1437,7 +1987,7 @@ class _ChatScreenState extends State<ChatScreen> {
     List<Map<String, String>> publicChatbots = [];
 
     // Listener cho chatbot của người dùng
-    FirebaseFirestore.instance
+    _suggestionsSubscription = FirebaseFirestore.instance
         .collection('chatbot_customizations')
         .where('userId', isEqualTo: currentUserId)
         .snapshots()
@@ -1456,7 +2006,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     // Listener cho chatbot public (loại bỏ những chatbot thuộc về người dùng hiện tại)
-    FirebaseFirestore.instance
+    _suggestionsSubscription = FirebaseFirestore.instance
         .collection('chatbot_customizations')
         .where('isPublic', isEqualTo: true)
         .where('userId', isNotEqualTo: currentUserId)
@@ -1512,6 +2062,7 @@ class _ChatScreenState extends State<ChatScreen> {
               title: Text(name),
               onTap: () {
                 _insertSuggestion(name);
+                if (avatarUrl.isNotEmpty) _currentChatbotAvatar = avatarUrl;
               },
             );
           },
@@ -1577,7 +2128,7 @@ class _ChatScreenState extends State<ChatScreen> {
         return querySnapshot.docs.first['chatbotDescription'] as String?;
       }
     } catch (e) {
-      print('Error fetching chatbotDescription: $e');
+      // print('Error fetching chatbotDescription: $e');
     }
     return null;
   }
@@ -1598,39 +2149,6 @@ class _ChatScreenState extends State<ChatScreen> {
   //   }
   // }
 
-  bool _isImagePath(String content) {
-    // final urlRegex = RegExp(r'(http|https):\/\/.*\.(?:png|jpg|webp)');
-    final filePathRegex = RegExp(r'.*\.(png|jpg|webp)$');
-    return filePathRegex.hasMatch(content);
-  }
-
-  bool _isVideoPath(String content) {
-    final videoRegex = RegExp(r'.*\.(mp4|flv|webm)$');
-    return videoRegex.hasMatch(content);
-  }
-
-  bool _isPdfPath(String content) {
-    final pdfRegex = RegExp(r'.*\.pdf$');
-    return pdfRegex.hasMatch(content);
-  }
-
-  bool _isAudioPath(String content) {
-    final audioRegex = RegExp(r'.*\.(mp3|wav|aac|flac|m4a|ogg)$');
-    return audioRegex.hasMatch(content);
-  }
-
-  bool _isTextFilePath(String content) {
-    final audioRegex = RegExp(r'.*\.(txt|json|xml)$');
-    return audioRegex.hasMatch(content);
-  }
-
-  bool _isFilePath(String content) {
-    return _isImagePath(content) || _isVideoPath(content)
-        || _isAudioPath(content) || _isPdfPath(content)
-        || _isTextFilePath(content);
-  }
-
-
   Future<String?> _getVideoThumbnail(String videoUrl) async {
     try {
       final thumbnailFile = await VideoThumbnail.thumbnailFile(
@@ -1638,17 +2156,17 @@ class _ChatScreenState extends State<ChatScreen> {
         imageFormat: ImageFormat.JPEG,
         quality: 50, // Chất lượng thumbnail (0-100)
       );
-      print("thumbnailFile: $thumbnailFile");
+      // print("thumbnailFile: $thumbnailFile");
       return thumbnailFile; // Đường dẫn đến file thumbnail
     } catch (e) {
-      print("Error getting thumbnail: $e");
+      // print("Error getting thumbnail: $e");
       return null;
     }
   }
 
   // Hiển thị biểu tượng cho các loại file
-  Widget _displayFile(String content) {
-    if (_isImagePath(content)) {
+  Widget _displayFile(String content, String type) {
+    if (type == 'image') {
       // print("image content: $content");
       if (content.startsWith('http')) {
         return GestureDetector(
@@ -1662,6 +2180,24 @@ class _ChatScreenState extends State<ChatScreen> {
             content,
             height: 150,
             fit: BoxFit.contain,
+            // Hiển thị loading indicator khi đang tải ảnh
+            loadingBuilder: (BuildContext context, Widget child, ImageChunkEvent? loadingProgress) {
+              if (loadingProgress == null) {
+                return child; // Ảnh đã load xong
+              } else {
+                return Container(
+                  height: 150,
+                  color: Colors.grey[300],
+                  alignment: Alignment.center,
+                  child: CircularProgressIndicator(
+                    value: loadingProgress.expectedTotalBytes != null
+                        ? loadingProgress.cumulativeBytesLoaded / (loadingProgress.expectedTotalBytes ?? 1)
+                        : null,
+                  ),
+                );
+              }
+            },
+            // Lỗi tải ảnh
             errorBuilder: (context, error, stackTrace) {
               return Container(
                 width: 150,
@@ -1679,21 +2215,106 @@ class _ChatScreenState extends State<ChatScreen> {
           fit: BoxFit.contain,
         );
       }
-    } else if (_isVideoPath(content)) {
+    } else if (type == 'video') {
         return _buildVideoWidget(content);
-    } else if (_isPdfPath(content)) {
+    } else if (type == 'pdf') {
         return _buildFileWidget(
             content,
             Icon(Icons.picture_as_pdf, color: Colors.red)
         );
-    } else if (_isAudioPath(content)) {
+    } else if (type == 'audio') {
         return AudioPlayerItem(audioUrl: content);
+    } else if (type == 'youtube') {
+      String videoId = _extractYouTubeId(Uri.parse(content));
+      String thumbnailUrl = 'https://img.youtube.com/vi/$videoId/maxresdefault.jpg';
+      return GestureDetector(
+        onTap: () async {
+          try {
+            // Kiểm tra URL có thể mở được không
+            final uri = Uri.parse(content);
+            bool canLaunchLink = await canLaunchUrl(uri);
+
+            if (canLaunchLink) {
+              // Nếu có thể mở, mở URL trong ứng dụng ngoài (trình duyệt hoặc ứng dụng YouTube)
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            } else {
+              throw 'Không thể mở link: $content';  // Ném lỗi nếu không mở được
+            }
+          } catch (e) {
+            print("Error: $e");
+          }
+        },
+        child: Column(
+          children: [
+            _buildYouTubeWidget(thumbnailUrl, width: 300),
+            // Đoạn đường link phía dưới thumbnail
+            Container(
+              width: 300,
+              padding: EdgeInsets.all(10),
+              child: Text(
+                content,
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 16,
+                  decoration: TextDecoration.underline,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
     } else {
         return _buildFileWidget(
             content,
             Icon(Icons.description, color: Colors.white)
         );
     }
+  }
+
+  Widget _buildYouTubeWidget(String thumbnailUrl, {double? width}) {
+    return Stack(
+      alignment: Alignment.center, // Căn giữa các phần tử trong Stack
+      children: [
+        // Hiển thị thumbnail
+        Image.network(
+          thumbnailUrl,
+          height: 150,
+          width: width ?? null,
+          fit: BoxFit.cover,  // Sử dụng BoxFit.cover để lấp đầy khu vực với thumbnail
+          // Hiển thị loading indicator khi đang tải ảnh
+          loadingBuilder: (BuildContext context, Widget child, ImageChunkEvent? loadingProgress) {
+            if (loadingProgress == null) {
+              return child; // Ảnh đã load xong
+            } else {
+              return Container(
+                height: 150,
+                color: Colors.grey[300], // Hiển thị ảnh xám
+              );
+            }
+          },
+          // Lỗi tải ảnh
+          errorBuilder: (context, error, stackTrace) {
+            return Container(
+              width: 150,
+              height: 150,
+              color: Colors.grey[300],
+            );
+          },
+        ),
+        // Biểu tượng Play ở giữa thumbnail
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(15),
+          ),
+          child: Icon(
+            Icons.smart_display_rounded,
+            color: Colors.red,
+            size: 50,  // Kích thước của biểu tượng Play
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _buildVideoWidget(String content) {
@@ -1708,6 +2329,7 @@ class _ChatScreenState extends State<ChatScreen> {
           return Container(
             height: 150,
             width: 200,
+            color: Colors.grey[300],
             alignment: Alignment.center,
             child: CircularProgressIndicator(),
           );
@@ -1735,6 +2357,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   height: 150,
                   width: 200,
                   decoration: BoxDecoration(
+                      color: Colors.grey[300],
                       borderRadius: BorderRadius.circular(8),
                       image: DecorationImage(
                           fit: BoxFit.cover,
@@ -1852,24 +2475,32 @@ class _ChatScreenState extends State<ChatScreen> {
   // }
 
   String removeVietnameseDiacritics(String str) {
-    const vietnamese = 'àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ';
-    const noVietnamese = 'aaaaaaaaaaaaaaaaaeeeeeeeeeeiiiiiooooooooooooooooouuuuuuuuuuuyyyyyd';
-    String result = '';
-    for (int i = 0; i < str.length; i++) {
-      int index = vietnamese.indexOf(str[i]);
-      if (index >= 0) {
-        result += noVietnamese[index];
-      } else {
-        result += str[i];
-      }
+    final Map<String, String> _charMap = {
+      'à': 'a', 'á': 'a', 'ạ': 'a', 'ả': 'a', 'ã': 'a',
+      'â': 'a', 'ầ': 'a', 'ấ': 'a', 'ậ': 'a', 'ẩ': 'a', 'ẫ': 'a',
+      'ă': 'a', 'ằ': 'a', 'ắ': 'a', 'ặ': 'a', 'ẳ': 'a', 'ẵ': 'a',
+      'è': 'e', 'é': 'e', 'ẹ': 'e', 'ẻ': 'e', 'ẽ': 'e',
+      'ê': 'e', 'ề': 'e', 'ế': 'e', 'ệ': 'e', 'ể': 'e', 'ễ': 'e',
+      'ì': 'i', 'í': 'i', 'ị': 'i', 'ỉ': 'i', 'ĩ': 'i',
+      'ò': 'o', 'ó': 'o', 'ọ': 'o', 'ỏ': 'o', 'õ': 'o',
+      'ô': 'o', 'ồ': 'o', 'ố': 'o', 'ộ': 'o', 'ổ': 'o', 'ỗ': 'o',
+      'ơ': 'o', 'ờ': 'o', 'ớ': 'o', 'ợ': 'o', 'ở': 'o', 'ỡ': 'o',
+      'ù': 'u', 'ú': 'u', 'ụ': 'u', 'ủ': 'u', 'ũ': 'u',
+      'ư': 'u', 'ừ': 'u', 'ứ': 'u', 'ự': 'u', 'ử': 'u', 'ữ': 'u',
+      'ỳ': 'y', 'ý': 'y', 'ỵ': 'y', 'ỷ': 'y', 'ỹ': 'y',
+      'đ': 'd',
+    };
+    final buffer = StringBuffer();
+    for (final char in str.characters) {
+      buffer.write(_charMap[char] ?? char);
     }
-    return result;
+    return buffer.toString();
   }
 
   /// Hàm hiển thị hộp thoại với các tùy chọn cho tin nhắn.
   Future<void> _showMessageOptions(LongPressStartDetails details, BuildContext context, Map<String, dynamic> message, int index) async {
     final content = message['content'] ?? '';
-    final isFile = _isFilePath(content);
+    final type = message['type'] ?? '';
     Offset _tapPosition = details.globalPosition;
 
     final selected = await showMenu(
@@ -1878,7 +2509,7 @@ class _ChatScreenState extends State<ChatScreen> {
         borderRadius: BorderRadius.circular(12), // Bo góc menu
       ),
       position: RelativeRect.fromLTRB(_tapPosition.dx, _tapPosition.dy, _tapPosition.dx, _tapPosition.dy),
-      items: isFile
+      items: type != 'text' && type != 'youtube'
           ? [
         PopupMenuItem<String>(
           value: 'download',
@@ -2079,11 +2710,12 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               // Thông tin người dùng (đặt ngoài expand - cố định)
               GestureDetector(
-                onTap: () {
+                onTap: () async {
                   Navigator.of(context).pop();
-                  Navigator.of(context).push(
+                  await Navigator.of(context).push(
                     MaterialPageRoute(builder: (context) => SettingsScreen()),
                   );
+                  _loadAvatarSetting();
                 },
                 child: Container(
                   decoration: BoxDecoration(color: Colors.blue),
@@ -2129,8 +2761,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   final isUser = message['role'] == 'user';
                   final isError = message['role'] == 'error';
                   final content = message['content'] ?? '';
+                  final type = message['type'];
+                  final avatar = message['avatar'] ?? '';
 
-                  return
+                  return // Align → Row → (Avatar + Flexible(GestureDetector → Container))
                     // Dismissible(
                     // key: Key(message['content'] + index.toString()),
                     // direction: isUser
@@ -2161,48 +2795,68 @@ class _ChatScreenState extends State<ChatScreen> {
                           _showMessageOptions(details, context, message, idx);
                         },
                         //Tin nhắn
-                        child: Container(
-                          // key: ValueKey(message['content']), //////////////////
-                          margin: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                          padding: _isFilePath(content)
-                              ? EdgeInsets.zero : EdgeInsets.all(10),
-                          constraints: isUser ? BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75) : null, // Giới hạn chiều rộng
-                          decoration: BoxDecoration(
-                            color: isError
-                                ? Theme.of(context).colorScheme.error
-                                : (isUser
-                                    ? Theme.of(context).colorScheme.primaryContainer
-                                    : Theme.of(context).colorScheme.secondaryContainer),
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          child: _isFilePath(content)
-                          ? ClipRRect(
-                              borderRadius: BorderRadius.circular(16),
-                              child: _displayFile(content),
-                          )
-                          : MarkdownBody(
-                              data: content,
-                              onTapLink: (text, href, title) async {
-                                if (href != null) {
-                                  final uri = Uri.parse(href);
-                                  bool canLaunchLink = await canLaunchUrl(uri);
-                                  // print("Can launch $uri: $canLaunchLink");
-                                  if (canLaunchLink) {
-                                    await launchUrl(uri, mode: LaunchMode.externalApplication);
-                                  } else {
-                                    // print("Không thể mở link: $uri");
-                                    throw 'Không thể mở link: $href';
-                                  }
-                                }
-                              },
-                              styleSheet: MarkdownStyleSheet(
-                                p: TextStyle(
-                                    color: isUser ? Theme.of(context).colorScheme.onPrimaryContainer : Theme.of(context).colorScheme.onSecondaryContainer,
-                                    fontSize: 16, // Cỡ chữ lớn hơn một chút
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+                          children: [
+                            if (!isUser && _isAvatarEnabled) ...[
+                              Padding(
+                                padding: const EdgeInsets.only(left: 8.0, right: 4.0),
+                                child: CircleAvatar(
+                                  radius: 18,
+                                  backgroundImage: avatar.isNotEmpty
+                                    ? NetworkImage(avatar)
+                                    : AssetImage('assets/avatar/default_bot_avt.png') as ImageProvider,
                                 ),
                               ),
+                            ],
+                            Flexible(
+                              child: Container(
+                                // key: ValueKey(message['content']), //////////////////
+                                key: ValueKey(idx), // Giúp Flutter nhận diện đúng widget nào thay đổi
+                                margin: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                                padding: type != 'text'
+                                    ? EdgeInsets.zero : EdgeInsets.all(10),
+                                constraints: isUser ? BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75) : null, // Giới hạn chiều rộng
+                                decoration: BoxDecoration(
+                                  color: isError
+                                      ? Theme.of(context).colorScheme.error
+                                      : (isUser
+                                          ? Theme.of(context).colorScheme.primaryContainer
+                                          : Theme.of(context).colorScheme.secondaryContainer),
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                child: type != 'text'
+                                ? ClipRRect(
+                                    borderRadius: BorderRadius.circular(16),
+                                    child: _displayFile(content, type),
+                                )
+                                : MarkdownBody(
+                                    data: content,
+                                    onTapLink: (text, href, title) async {
+                                      if (href != null) {
+                                        final uri = Uri.parse(href);
+                                        bool canLaunchLink = await canLaunchUrl(uri);
+                                        // print("Can launch $uri: $canLaunchLink");
+                                        if (canLaunchLink) {
+                                          await launchUrl(uri, mode: LaunchMode.externalApplication);
+                                        } else {
+                                          // print("Không thể mở link: $uri");
+                                          throw 'Không thể mở link: $href';
+                                        }
+                                      }
+                                    },
+                                    styleSheet: MarkdownStyleSheet(
+                                      p: TextStyle(
+                                          color: isUser ? Theme.of(context).colorScheme.onPrimaryContainer : Theme.of(context).colorScheme.onSecondaryContainer,
+                                          fontSize: 16, // Cỡ chữ lớn hơn một chút
+                                      ),
+                                    ),
+                                  ),
+                                ),
                             ),
-                          ),
+                          ],
+                        ),
                       ),
                     // ),
                   );
@@ -2211,6 +2865,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             _showFilesPicked(),
             _showImagesPicked(),
+            _showYoutubePicked(),
             _buildSuggestions(),
             _buildMessageInputRow(),
             _showAudioRecording(),
